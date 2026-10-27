@@ -1,6 +1,7 @@
 package com.backend.plateform.tomcat;
 
 import com.backend.core.Registry;
+import com.backend.utility.DataTypeUtility;
 
 import java.util.HashMap;
 
@@ -27,15 +28,20 @@ public class MysqlDataSourceService {
 
     /**
      * Loads default local MySQL credentials.
-     * Values are read from application.properties (microservice.local.database.*) in real app,
-     * here hardcoded for demo / fallback.
+     * Env variables DB_URL / DB_USERNAME / DB_PASSWORD set hon to wahi use honge (server pe password code me na rahe),
+     * warna local fallback (localhost:3306 / root / hrhk).
      */
     public static HashMap<String, String> loadDatabaseCredentialsFromLocalHost() {
-        Registry.dbmap.put("url", "localhost:3306");
-        Registry.dbmap.put("username", "root");
-        Registry.dbmap.put("password", "hrhk");
+        Registry.dbmap.put("url", envOrDefault("DB_URL", "localhost:3306"));
+        Registry.dbmap.put("username", envOrDefault("DB_USERNAME", "root"));
+        Registry.dbmap.put("password", envOrDefault("DB_PASSWORD", "hrhk"));
         Registry.dbmap.put("driverClassName", "com.mysql.cj.jdbc.Driver");
         Registry.dbmap.put("databasename", "dbgym");
         return Registry.dbmap;
+    }
+
+    private static String envOrDefault(String name, String defaultValue) {
+        String value = DataTypeUtility.stringValue(System.getenv(name));
+        return value.isEmpty() ? defaultValue : value;
     }
 }

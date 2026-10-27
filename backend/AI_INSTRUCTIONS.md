@@ -63,4 +63,29 @@ Long id = Long.parseLong(param.get("id").toString());
 
 ---
 
+## 5) Auth / Security - MANDATORY
+
+- Login pe signed JWT `src/main/java/com/backend/core/auth/JwtTokenService.java` se banta hai (secret `jwt.secret` = env `JWT_SECRET`, min 32 chars). Token me secret kabhi mat daalo.
+- `src/main/java/com/backend/core/auth/AuthInterceptor.java` protected APIs pe `Authorization: Bearer <token>` + token ka `gym_code` == `X-Gym-Code` check karta hai, warna 401.
+- **Naya module (members, fees...) banao to uska BASE path `WebConfig.addInterceptors()` me authInterceptor ke saath add karo.**
+- Service me login wala gym code `request.getAttribute(AuthInterceptor.AUTH_GYM_CODE)` se lo; get/edit/delete by id me record ka gym_code match karo (dekho `GymDetailsServiceImpl.isAccessible()`).
+- Password hamesha BCrypt (`BCryptPasswordEncoder`). Purane plain password login pe apne aap hash ho jaate hain.
+- Error me `e.getMessage()` user ko mat bhejo — `e.printStackTrace()` + generic message.
+- Server pe env vars: `JWT_SECRET`, `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `CORS_ALLOWED_ORIGINS`.
+- Naye gym ke liye `gymcommon.gym_registry` me row (gym_code, gym_name, db_name) zaroori hai, warna validateGym/login fail.
+
+---
+
+## 6) Schema changes + Roles (Phase 1 se)
+
+- `hbm2ddl=none` hai aur Flyway use nahi karte. **Har schema change ek nayi SQL file `db/phase<N>_<naam>.sql` me** (`CREATE TABLE IF NOT EXISTS`), har gym DB pe manually chalao. Purani SQL file edit mat karo.
+- Har naye tenant table me `gym_code` column + `created_by/created_on/updated_by/updated_on`, paisa `DECIMAL(10,2)`, soft delete `isdelete`.
+- Service me gym code / user / role **sirf** `src/main/java/com/backend/utility/AuthContext.java` se: `AuthContext.gymCode(request)`, `username()`, `role()`, `isManager()`. Client ka bheja gym_code kabhi trust mat karo.
+- Roles: `OWNER` / `ADMIN` = manager (plans, archive, cancel). `STAFF` = members add/edit + plan assign/renew. Permission check service me: `if (!AuthContext.isManager(request)) return failedMessage("Permission denied")`.
+- Membership date / status logic sirf `service/member/MembershipDateCalculator.java` (Java) + `MemberStatusSql.java` (SQL) me — dono same rule rakho, list aur dashboard ke total isi se match karte hain. Unit test: `MembershipDateCalculatorTest`.
+- Assign/renew me member row lock (`MemberRepo.lockByIdAndGymCode`) + overlap check; renew me `after_membership_id` se double-tap reject. Membership banne se paid nahi hoti (`payment_status=UNPAID`).
+- Response me `LocalDate`/`LocalDateTime` seedha mat bhejo (ObjectMapper me date module nahi) — `stringValue(date)` karo.
+
+---
+
 **Is file ko har AI task se pehle padhna ZAROORI hai. Agar iska ullanghan hua to code review fail samjho.**

@@ -1,5 +1,6 @@
 package com.backend.service.auth;
 
+import com.backend.core.auth.JwtTokenService;
 import com.backend.core.gymcommon.GymRegistryService;
 import com.backend.core.multitenancy.TenantContextHolder;
 import com.backend.entity.gym.GymUserModel;
@@ -7,10 +8,9 @@ import com.backend.repo.gym.GymUserRepo;
 import com.backend.utility.MobileResponseDTOFactory;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -29,8 +29,10 @@ public class AuthServiceImpl implements AuthService {
     @Autowired
     private MobileResponseDTOFactory mobileResponseDTOFactory;
 
-    @Value("${jwt.secret:changeme-backend-secret}")
-    private String jwtSecret;
+    @Autowired
+    private JwtTokenService jwtTokenService;
+
+    private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
     @Override
     public Object validateGymCode(Map<String, Object> param, HttpServletRequest request) {
@@ -61,7 +63,8 @@ public class AuthServiceImpl implements AuthService {
                 // keep tenant for this request, clear after
             }
         } catch (Exception e) {
-            return mobileResponseDTOFactory.failedMessage(e.getMessage());
+            e.printStackTrace();
+            return mobileResponseDTOFactory.failedMessage("Unable to validate gym code, please try again");
         }
     }
 
@@ -80,26 +83,17 @@ public class AuthServiceImpl implements AuthService {
             String dbName = gymRegistryService.resolveDbName(gymCode);
             if (dbName == null) return mobileResponseDTOFactory.failedMessage("Invalid gym code");
 
-            // Switch tenant to that gym's DB for user lookup
+            // Switch tenant to that gym's DB (write pool - purana plain password hash me update ho sakta hai)
             TenantContextHolder.setTenantId(dbName);
-            // For _read vs _write, use write for login audit? Use base
-            Optional<GymUserModel> opt = gymUserRepo.findByGymCodeAndUsernameAndIsActiveTrue(gymCode, username);
-            // fallback case insensitive
-            if (opt.isEmpty()) opt = gymUserRepo.findByGymCodeAndUsername(gymCode, username);
-            if (opt.isEmpty()) return mobileResponseDTOFactory.failedMessage("Invalid username or gym code");
+            Optional<GymUserModel> opt = gymUserRepo.findByGymCodeAndUsername(gymCode, username);
+            if (opt.isEmpty() || !passwordMatches(opt.get(), password)) {
+                return mobileResponseDTOFactory.failedMessage("Invalid username or password");
+            }
 
             GymUserModel user = opt.get();
             if (!Boolean.TRUE.equals(user.getIsActive())) return mobileResponseDTOFactory.failedMessage("User is inactive");
 
-            // Simple password check (plain for demo, in production use BCrypt)
-            if (!password.equals(user.getPasswordHash())) {
-                // try case: if stored as plain, also accept
-                return mobileResponseDTOFactory.failedMessage("Invalid password");
-            }
-
-            // Generate simple token (Base64 of gym_code:username:timestamp:secret)
-            String payload = gymCode + ":" + username + ":" + System.currentTimeMillis() + ":" + jwtSecret;
-            String token = Base64.getEncoder().encodeToString(payload.getBytes());
+            String token = jwtTokenService.generateToken(gymCode, username, user.getId(), stringValue(user.getRole()));
 
             Map<String, Object> data = new HashMap<>();
             data.put("token", token);
@@ -112,7 +106,24 @@ public class AuthServiceImpl implements AuthService {
             request.setAttribute("REQUEST_DATABASE_NAME", dbName);
             return mobileResponseDTOFactory.successMessage("Login successful", data);
         } catch (Exception e) {
-            return mobileResponseDTOFactory.failedMessage(e.getMessage());
+            e.printStackTrace();
+            return mobileResponseDTOFactory.failedMessage("Login failed, please try again");
         }
+    }
+
+    /**
+     * BCrypt hash se password match karta hai.
+     * Purane users jinka password plain text me save hai: plain match hone pe usi waqt BCrypt hash me convert kar deta hai.
+     */
+    private boolean passwordMatches(GymUserModel user, String password) {
+        String stored = stringValue(user.getPasswordHash());
+        if (stored.isEmpty()) return false;
+        if (stored.startsWith("$2a$") || stored.startsWith("$2b$") || stored.startsWith("$2y$")) {
+            return passwordEncoder.matches(password, stored);
+        }
+        if (!stored.equals(password)) return false;
+        user.setPasswordHash(passwordEncoder.encode(password));
+        gymUserRepo.save(user);
+        return true;
     }
 }

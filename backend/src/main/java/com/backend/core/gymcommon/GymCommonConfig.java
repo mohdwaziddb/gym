@@ -19,10 +19,11 @@ public class GymCommonConfig {
     @Value("${microservice.local.database.port:3306}")
     private String localDbPort;
 
-    @Value("${microservice.local.database.username:root}")
+    // Env DB_USERNAME / DB_PASSWORD (same as MysqlDataSourceService), warna local fallback
+    @Value("${DB_USERNAME:${microservice.local.database.username:root}}")
     private String username;
 
-    @Value("${microservice.local.database.password:hrhk}")
+    @Value("${DB_PASSWORD:${microservice.local.database.password:hrhk}}")
     private String password;
 
     @Bean(name = "gymcommonDataSource")

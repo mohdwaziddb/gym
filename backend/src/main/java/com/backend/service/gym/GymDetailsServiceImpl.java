@@ -1,5 +1,6 @@
 package com.backend.service.gym;
 
+import com.backend.core.auth.AuthInterceptor;
 import com.backend.core.multitenancy.TenantContextHolder;
 import com.backend.entity.gym.GymDetailsModel;
 import com.backend.repo.gym.GymDetailsRepo;
@@ -16,9 +17,13 @@ import static com.backend.utility.DataTypeUtility.*;
 
 /**
  * GymDetailsServiceImpl - Gym management with DATABASE-per-tenant handling.
+ * Isolation rule: login wale gym ka code (JWT se) jis record ke gym_code se match kare, sirf wahi
+ * list / get / edit / delete ho sakta hai.
  */
 @Service
 public class GymDetailsServiceImpl implements GymDetailsService {
+
+    private static final String GENERIC_ERROR = "Something went wrong, please try again";
 
     @Autowired
     private GymDetailsRepo gymDetailsRepo;
@@ -33,11 +38,7 @@ public class GymDetailsServiceImpl implements GymDetailsService {
             String fts = stringValue(param.get("fts"));
             String city = stringValue(param.get("city"));
             String gymName = stringValue(param.get("gym_name"));
-
-            // Header based gym_code for isolation within single DB dbgym
-            String headerGymCode = request.getHeader("X-Gym-Code");
-            if (headerGymCode == null || headerGymCode.trim().isEmpty()) headerGymCode = request.getHeader("x-gym-code");
-            if (headerGymCode != null) headerGymCode = headerGymCode.trim().toUpperCase();
+            String currentGymCode = currentGymCode(request);
 
             List<GymDetailsModel> list;
 
@@ -55,11 +56,7 @@ public class GymDetailsServiceImpl implements GymDetailsService {
 
             List<Map<String, Object>> dataArray = new LinkedList<>();
             for (GymDetailsModel m : list) {
-                if (m == null || Boolean.TRUE.equals(m.getIsdelete())) continue;
-                // Isolation: when X-Gym-Code header present and tenant is shared dbgym, filter to that gym_code only
-                if (headerGymCode != null && !headerGymCode.isEmpty() && !headerGymCode.equalsIgnoreCase(stringValue(m.getGymCode()))) {
-                    continue;
-                }
+                if (!isAccessible(m, currentGymCode)) continue;
                 Map<String, Object> row = new HashMap<>();
                 row.put("id", longValue(m.getId()));
                 row.put("gym_name", stringValue(m.getGymName()));
@@ -69,20 +66,18 @@ public class GymDetailsServiceImpl implements GymDetailsService {
                 row.put("email", stringValue(m.getEmail()));
                 row.put("address", stringValue(m.getAddress()));
                 row.put("city", stringValue(m.getCity()));
-                row.put("monthly_fees", m.getMonthlyFees() == null ? null : m.getMonthlyFees().toString());
+                row.put("monthly_fees", m.getMonthlyFees() == null ? null : stringValue(m.getMonthlyFees().toPlainString()));
                 row.put("is_active", booleanValue(m.getIsActive()));
-                row.put("tenant", stringValue(TenantContextHolder.getTenant()));
                 dataArray.add(row);
             }
 
             Map<String, Object> result = new HashMap<>();
             result.put("data_array", dataArray);
             result.put("result_size", dataArray.size());
-            result.put("tenant", stringValue(TenantContextHolder.getTenant()));
-            result.put("database", stringValue(request.getAttribute("REQUEST_DATABASE_NAME")));
-            return result;
+            return mobileResponseDTOFactory.successMessage("Gym list", result);
         } catch (Exception e) {
-            return mobileResponseDTOFactory.failedMessage(e.getMessage());
+            e.printStackTrace();
+            return mobileResponseDTOFactory.failedMessage(GENERIC_ERROR);
         }
     }
 
@@ -92,48 +87,60 @@ public class GymDetailsServiceImpl implements GymDetailsService {
         try {
             Long id = longValue(param.get("id"));
             String gymName = stringValue(param.get("gym_name"));
-            String gymCode = stringValue(param.get("gym_code"));
-            String ownerName = stringValue(param.get("owner_name"));
-            String contactNo = stringValue(param.get("contact_no"));
-            String email = stringValue(param.get("email"));
-            String address = stringValue(param.get("address"));
-            String city = stringValue(param.get("city"));
-            String feesStr = stringValue(param.get("monthly_fees"));
-            Boolean isActive = param.get("is_active") != null ? booleanValue(param.get("is_active")) : true;
+            String gymCode = stringValue(param.get("gym_code")).toUpperCase();
+            String currentGymCode = currentGymCode(request);
 
             if (gymName.isEmpty()) {
                 return mobileResponseDTOFactory.failedMessage("gym_name is mandatory");
             }
-            if (gymCode.isEmpty()) {
-                gymCode = gymName.toLowerCase().replaceAll("[^a-z0-9]", "_") + "_" + System.currentTimeMillis() % 10000;
+
+            BigDecimal monthlyFees = null;
+            String feesStr = stringValue(param.get("monthly_fees"));
+            if (!feesStr.isEmpty()) {
+                try {
+                    monthlyFees = new BigDecimal(feesStr);
+                } catch (NumberFormatException e) {
+                    return mobileResponseDTOFactory.failedMessage("monthly_fees must be a number");
+                }
+                if (monthlyFees.signum() < 0) return mobileResponseDTOFactory.failedMessage("monthly_fees cannot be negative");
             }
 
             GymDetailsModel model;
             if (id != null) {
                 Optional<GymDetailsModel> opt = gymDetailsRepo.findById(id);
-                if (opt.isEmpty()) return mobileResponseDTOFactory.failedMessage("Gym not found for id: " + id);
+                if (opt.isEmpty() || !isAccessible(opt.get(), currentGymCode)) {
+                    return mobileResponseDTOFactory.failedMessage("Gym not found");
+                }
                 model = opt.get();
-                if (Boolean.TRUE.equals(model.getIsdelete())) return mobileResponseDTOFactory.failedMessage("Cannot update deleted gym");
+                // gym_code hi login/isolation ki pehchaan hai, edit me badla to record apne hi gym se gayab ho jayega
+                if (!gymCode.isEmpty() && !gymCode.equalsIgnoreCase(stringValue(model.getGymCode()))) {
+                    return mobileResponseDTOFactory.failedMessage("gym_code cannot be changed");
+                }
+                gymCode = stringValue(model.getGymCode());
             } else {
-                // check duplicate gym_code
-                Optional<GymDetailsModel> existing = gymDetailsRepo.findByGymCode(gymCode);
-                if (existing.isPresent() && Boolean.FALSE.equals(existing.get().getIsdelete())) {
-                    return mobileResponseDTOFactory.failedMessage("gym_code already exists: " + gymCode);
+                if (gymCode.isEmpty()) {
+                    gymCode = gymName.toUpperCase().replaceAll("[^A-Z0-9]", "_") + "_" + System.currentTimeMillis() % 10000;
                 }
                 model = new GymDetailsModel();
             }
 
+            // duplicate gym_code check (add + edit dono me) - same record ko chhod ke
+            Optional<GymDetailsModel> existing = gymDetailsRepo.findByGymCode(gymCode);
+            if (existing.isPresent() && !Objects.equals(existing.get().getId(), model.getId())) {
+                return mobileResponseDTOFactory.failedMessage("gym_code already exists: " + gymCode);
+            }
+
             model.setGymName(gymName);
             model.setGymCode(gymCode);
-            model.setOwnerName(ownerName);
-            model.setContactNo(contactNo);
-            model.setEmail(email);
-            model.setAddress(address);
-            model.setCity(city);
-            if (!feesStr.isEmpty()) {
-                try { model.setMonthlyFees(new BigDecimal(feesStr)); } catch (Exception e) { model.setMonthlyFees(BigDecimal.ZERO); }
-            }
-            model.setIsActive(isActive);
+            // Edit me sirf wahi fields update hon jo request me aayi hain, baaki purani value bani rahe
+            if (id == null || param.containsKey("owner_name")) model.setOwnerName(stringValue(param.get("owner_name")));
+            if (id == null || param.containsKey("contact_no")) model.setContactNo(stringValue(param.get("contact_no")));
+            if (id == null || param.containsKey("email")) model.setEmail(stringValue(param.get("email")));
+            if (id == null || param.containsKey("address")) model.setAddress(stringValue(param.get("address")));
+            if (id == null || param.containsKey("city")) model.setCity(stringValue(param.get("city")));
+            if (id == null || param.containsKey("monthly_fees")) model.setMonthlyFees(monthlyFees);
+            if (param.containsKey("is_active")) model.setIsActive(booleanValue(param.get("is_active")));
+            else if (id == null) model.setIsActive(true);
             model.setIsdelete(false);
 
             gymDetailsRepo.save(model);
@@ -144,7 +151,8 @@ public class GymDetailsServiceImpl implements GymDetailsService {
             data.put("gym_code", model.getGymCode());
             return mobileResponseDTOFactory.successMessage("Gym saved successfully", data);
         } catch (Exception e) {
-            return mobileResponseDTOFactory.failedMessage(e.getMessage());
+            e.printStackTrace();
+            return mobileResponseDTOFactory.failedMessage(GENERIC_ERROR);
         }
     }
 
@@ -155,26 +163,27 @@ public class GymDetailsServiceImpl implements GymDetailsService {
             Long id = longValue(param.get("id"));
             if (id == null) return mobileResponseDTOFactory.failedMessage("id is required");
             Optional<GymDetailsModel> opt = gymDetailsRepo.findById(id);
-            if (opt.isEmpty() || Boolean.TRUE.equals(opt.get().getIsdelete())) {
+            if (opt.isEmpty() || !isAccessible(opt.get(), currentGymCode(request))) {
                 return mobileResponseDTOFactory.failedMessage("Gym not found");
             }
             GymDetailsModel m = opt.get();
             Map<String, Object> row = new HashMap<>();
-            row.put("id", m.getId());
-            row.put("gym_name", m.getGymName());
-            row.put("gym_code", m.getGymCode());
-            row.put("owner_name", m.getOwnerName());
-            row.put("contact_no", m.getContactNo());
-            row.put("email", m.getEmail());
-            row.put("address", m.getAddress());
-            row.put("city", m.getCity());
-            row.put("monthly_fees", m.getMonthlyFees());
-            row.put("is_active", m.getIsActive());
-            row.put("created_on", m.getCreatedOn());
-            row.put("tenant", stringValue(TenantContextHolder.getTenant()));
-            return row;
+            row.put("id", longValue(m.getId()));
+            row.put("gym_name", stringValue(m.getGymName()));
+            row.put("gym_code", stringValue(m.getGymCode()));
+            row.put("owner_name", stringValue(m.getOwnerName()));
+            row.put("contact_no", stringValue(m.getContactNo()));
+            row.put("email", stringValue(m.getEmail()));
+            row.put("address", stringValue(m.getAddress()));
+            row.put("city", stringValue(m.getCity()));
+            row.put("monthly_fees", m.getMonthlyFees() == null ? null : stringValue(m.getMonthlyFees().toPlainString()));
+            row.put("is_active", booleanValue(m.getIsActive()));
+            // LocalDateTime ko string me bhejo (plain ObjectMapper date type serialize nahi karta)
+            row.put("created_on", stringValue(m.getCreatedOn()));
+            return mobileResponseDTOFactory.successMessage("Gym details", row);
         } catch (Exception e) {
-            return mobileResponseDTOFactory.failedMessage(e.getMessage());
+            e.printStackTrace();
+            return mobileResponseDTOFactory.failedMessage(GENERIC_ERROR);
         }
     }
 
@@ -185,14 +194,32 @@ public class GymDetailsServiceImpl implements GymDetailsService {
             Long id = longValue(param.get("id"));
             if (id == null) return mobileResponseDTOFactory.failedMessage("id is required");
             Optional<GymDetailsModel> opt = gymDetailsRepo.findById(id);
-            if (opt.isEmpty()) return mobileResponseDTOFactory.failedMessage("Gym not found");
+            if (opt.isEmpty() || !isAccessible(opt.get(), currentGymCode(request))) {
+                return mobileResponseDTOFactory.failedMessage("Gym not found");
+            }
             GymDetailsModel m = opt.get();
             m.setIsdelete(true);
             m.setIsActive(false);
             gymDetailsRepo.save(m);
             return mobileResponseDTOFactory.successMessage("Gym deleted (soft) successfully", null);
         } catch (Exception e) {
-            return mobileResponseDTOFactory.failedMessage(e.getMessage());
+            e.printStackTrace();
+            return mobileResponseDTOFactory.failedMessage(GENERIC_ERROR);
         }
+    }
+
+    /**
+     * Login wale gym ka code - AuthInterceptor JWT verify karke request attribute me rakhta hai.
+     */
+    private String currentGymCode(HttpServletRequest request) {
+        return stringValue(request.getAttribute(AuthInterceptor.AUTH_GYM_CODE)).toUpperCase();
+    }
+
+    /**
+     * Record deleted na ho aur login wale gym ka hi ho.
+     */
+    private boolean isAccessible(GymDetailsModel m, String currentGymCode) {
+        if (m == null || Boolean.TRUE.equals(m.getIsdelete())) return false;
+        return !currentGymCode.isEmpty() && currentGymCode.equalsIgnoreCase(stringValue(m.getGymCode()));
     }
 }
